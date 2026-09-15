@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<seu-usuario>/toggle-master-gitops.git
+    repoURL: https://github.com/mariccs/gitops-toggle-master.git
     targetRevision: main
     path: shared
   destination:
