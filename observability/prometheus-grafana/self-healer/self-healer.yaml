@@ -1,0 +1,133 @@
+# Self-healing DENTRO do cluster (substitui o caminho GitHub Actions + Lambda
+# quando a conta AWS não permite criar provedores OIDC do IAM, que o workflow
+# self-heal.yml usa para autenticar). O Alertmanager chama este receptor via
+# webhook e ele faz o equivalente a `kubectl rollout restart` no deployment
+# indicado no alerta, usando só RBAC do Kubernetes (sem AWS, sem GitHub).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: self-healer
+  namespace: observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: self-healer
+  namespace: togglemaster
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: self-healer
+  namespace: togglemaster
+subjects:
+  - kind: ServiceAccount
+    name: self-healer
+    namespace: observability
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: self-healer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: self-healer-script
+  namespace: observability
+data:
+  heal.py: |
+    import json, os, ssl, datetime, urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    SECRET = os.environ["SELF_HEAL_RELAY_SECRET"]
+    NS = "togglemaster"
+    ALLOWED = {"auth-service", "flag-service", "targeting-service",
+               "evaluation-service", "analytics-service"}
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+    CTX = ssl.create_default_context(cafile=f"{SA}/ca.crt")
+
+    def restart(name):
+        token = open(f"{SA}/token").read()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        body = json.dumps({"spec": {"template": {"metadata": {"annotations": {
+            "kubectl.kubernetes.io/restartedAt": now}}}}}).encode()
+        req = urllib.request.Request(
+            f"https://kubernetes.default.svc/apis/apps/v1/namespaces/{NS}/deployments/{name}",
+            data=body, method="PATCH",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/strategic-merge-patch+json"})
+        with urllib.request.urlopen(req, context=CTX) as r:
+            return r.status
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.headers.get("Authorization") != f"Bearer {SECRET}":
+                self.send_response(401); self.end_headers(); return
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n) or b"{}")
+            done = []
+            for a in body.get("alerts", []):
+                svc = a.get("labels", {}).get("service_name")
+                if a.get("status") == "firing" and svc in ALLOWED and svc not in done:
+                    try:
+                        print(f"[self-healer] rollout restart deployment/{svc} -> HTTP {restart(svc)}", flush=True)
+                    except Exception as e:
+                        print(f"[self-healer] erro ao reiniciar {svc}: {e}", flush=True)
+                    done.append(svc)
+            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+        def log_message(self, *a): pass
+
+    print("[self-healer] ouvindo em :9099", flush=True)
+    HTTPServer(("0.0.0.0", 9099), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: self-healer
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: self-healer}
+  template:
+    metadata:
+      labels: {app: self-healer}
+    spec:
+      serviceAccountName: self-healer
+      containers:
+        - name: self-healer
+          image: python:3.12-alpine
+          command: ["python", "-u", "/app/heal.py"]
+          env:
+            - name: SELF_HEAL_RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: alertmanager-chatops-secrets
+                  key: SELF_HEAL_RELAY_SECRET
+          ports:
+            - containerPort: 9099
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - name: script
+              mountPath: /app
+      volumes:
+        - name: script
+          configMap:
+            name: self-healer-script
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: self-healer
+  namespace: observability
+spec:
+  selector: {app: self-healer}
+  ports:
+    - port: 9099
+      targetPort: 9099

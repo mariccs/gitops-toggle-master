@@ -106,7 +106,6 @@ alertmanager:
                 type: Bearer
                 credentials_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/SELF_HEAL_RELAY_SECRET
             send_resolved: false
-            send_resolved: false
 
 # --- Grafana ---
 grafana:
