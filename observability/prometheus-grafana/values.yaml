@@ -169,15 +169,15 @@ additionalPrometheusRulesMap:
       - name: togglemaster.auth-service
         rules:
           - alert: AuthServiceHigh5xxRate
-            # calls_total vem do connector "spanmetrics" do OTel Collector,
+            # traces_span_metrics_calls_total vem do connector "spanmetrics" do OTel Collector,
             # derivado automaticamente dos traces (métricas RED), sem
             # precisar instrumentar manualmente um contador de erro em
             # cada serviço.
             expr: >
               (
-                sum(rate(calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[5m]))
+                sum(rate(traces_span_metrics_calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[5m]))
                 /
-                sum(rate(calls_total{service_name="auth-service"}[5m]))
+                sum(rate(traces_span_metrics_calls_total{service_name="auth-service"}[5m]))
               ) > 0.05
             for: 2m
             labels:
