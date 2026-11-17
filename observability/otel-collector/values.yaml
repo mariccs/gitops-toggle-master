@@ -1,0 +1,152 @@
+# Valores do chart "opentelemetry-collector".
+# Repositório Helm: https://open-telemetry.github.io/opentelemetry-helm-charts
+# Chart: opentelemetry-collector
+#
+# Este Collector é o roteador central de telemetria (requisito obrigatório
+# da Fase 4): recebe OTLP dos 5 microsserviços e distribui para:
+#   - Prometheus  (métricas RED derivadas dos traces pelo connector
+#                  "spanmetrics" — sem precisar instrumentar manualmente
+#                  um contador de erro/latência em cada serviço)
+#   - Loki        (logs, via endpoint OTLP nativo do Loki)
+#   - New Relic   (traces + métricas + logs, via OTLP/HTTP — é o APM
+#                  comercial escolhido para esta fase)
+
+mode: deployment
+replicaCount: 1
+
+# Fixa o nome do Service como "otel-collector" (em vez do nome calculado
+# pelo chart a partir do nome do release do Helm) — é o nome de DNS que
+# os 5 microsserviços usam para falar com o Collector
+# ("otel-collector.observability.svc.cluster.local").
+fullnameOverride: otel-collector
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  # O connector "spanmetrics" e o exporter "otlphttp" com suporte a logs
+  # para o Loki só existem na distribuição "contrib".
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 200Mi
+  limits:
+    cpu: 300m
+    memory: 400Mi
+
+# Lê a license key da New Relic de uma Secret (mesmo padrão de
+# k8s/generate-secrets.sh), nunca em texto neste arquivo.
+extraEnvs:
+  - name: NEW_RELIC_LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: otel-collector-secrets
+        key: NEW_RELIC_LICENSE_KEY
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+# Permite que o Prometheus (kube-prometheus-stack) descubra o endpoint de
+# métricas exposto pelo Collector (porta 8889, métricas derivadas do
+# spanmetrics) via ServiceMonitor.
+serviceMonitor:
+  enabled: true
+  extraLabels:
+    release: kube-prometheus-stack
+  metricsEndpoints:
+    # métricas internas do próprio Collector
+    - port: metrics
+    # métricas RED derivadas pelo spanmetrics (calls_total, duration_*)
+    # — é ESTA porta que alimenta o dashboard e o alerta de 5xx
+    - port: prometheus
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  connectors:
+    # Deriva métricas RED (Rate, Errors, Duration) automaticamente a
+    # partir dos spans recebidos — decisão arquitetural desta fase:
+    # evita instrumentar manualmente um contador de requisições/erros em
+    # cada um dos 5 microsserviços, mantendo a lógica de negócio limpa e
+    # centralizando a métrica de observabilidade no próprio pipeline do
+    # Collector.
+    spanmetrics:
+      histogram:
+        explicit:
+          buckets: [100us, 1ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s]
+      dimensions:
+        - name: http.status_code
+        - name: http.method
+      metrics_flush_interval: 15s
+
+  processors:
+    batch: {}
+    memory_limiter:
+      check_interval: 1s
+      limit_mib: 350
+      spike_limit_mib: 100
+    resource:
+      attributes:
+        - key: deployment.environment
+          value: sandbox
+          action: upsert
+
+  exporters:
+    # Métricas RED derivadas do spanmetrics -> Prometheus (scrape na
+    # porta 8889, exposta no Service via "ports.prometheus" acima).
+    prometheus:
+      endpoint: 0.0.0.0:8889
+      resource_to_telemetry_conversion:
+        enabled: true
+
+    # Logs -> Loki, via endpoint OTLP nativo do Loki (Loki 3.x), sem
+    # precisar de Promtail/Alloy como agente de coleta: os próprios
+    # microsserviços exportam logs via OTLP direto para este Collector.
+    otlphttp/loki:
+      endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+      tls:
+        insecure: true
+
+    # Traces + métricas + logs -> New Relic (APM comercial desta fase).
+    otlphttp/newrelic:
+      endpoint: https://otlp.nr-data.net:4318
+      headers:
+        api-key: "${env:NEW_RELIC_LICENSE_KEY}"
+      compression: gzip
+
+    debug:
+      verbosity: basic
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, resource, batch]
+        exporters: [spanmetrics, otlphttp/newrelic, debug]
+      metrics:
+        receivers: [otlp, spanmetrics]
+        processors: [memory_limiter, resource, batch]
+        exporters: [prometheus, otlphttp/newrelic]
+      logs:
+        receivers: [otlp]
+        processors: [memory_limiter, resource, batch]
+        exporters: [otlphttp/loki, otlphttp/newrelic]

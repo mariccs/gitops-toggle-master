@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+  annotations:
+    # Sobe antes do OTel Collector e dos microsserviços: o Prometheus
+    # precisa existir para o Collector e o Grafana terem onde escrever/ler.
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  sources:
+    # Fonte 1: o chart em si, direto do repositório Helm oficial.
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: "80.13.0"
+      helm:
+        valueFiles:
+          - $values/observability/prometheus-grafana/values.yaml
+    # Fonte 2: este repositório de GitOps, só para fornecer o values.yaml
+    # acima (é assim que a configuração do Helm chart fica versionada e
+    # revisável neste repositório, mesmo com o chart vindo de fora).
+    - repoURL: https://github.com/mariccs/gitops-toggle-master.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

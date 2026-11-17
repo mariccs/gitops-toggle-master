@@ -1,0 +1,190 @@
+# Valores do chart kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
+# Repositório Helm: https://prometheus-community.github.io/helm-charts
+# Chart: kube-prometheus-stack
+#
+# Este arquivo é consumido pela Application multi-source
+# argocd/applications/observability-prometheus-grafana.yaml — o Argo CD
+# busca o chart no repositório Helm oficial e aplica estes valores, que
+# ficam versionados aqui, no repositório de GitOps.
+#
+# IMPORTANTE: nenhum segredo (webhook do Discord, API key do Jira Service Management,
+# senha do Grafana) fica neste arquivo. Eles vêm de uma Secret do
+# Kubernetes chamada "alertmanager-chatops-secrets" e de uma Secret
+# "grafana-admin-secret", criadas à parte (mesmo padrão de
+# k8s/generate-secrets.sh já usado para os microsserviços) e referenciadas
+# abaixo só pelo caminho do arquivo montado — nunca pelo valor em texto.
+
+fullnameOverride: kube-prometheus-stack
+
+# --- Prometheus ---
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi
+      limits:
+        cpu: 500m
+        memory: 800Mi
+    # Permite que o Prometheus descubra ServiceMonitors/PodMonitors criados
+    # em qualquer namespace (os microsserviços do ToggleMaster ficam em
+    # "togglemaster", a stack de observabilidade em "observability").
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+# --- Alertmanager: roteamento do alerta de 5xx do auth-service ---
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+    # Monta a Secret "alertmanager-chatops-secrets" em
+    # /etc/alertmanager/secrets/alertmanager-chatops-secrets/<chave>,
+    # para os campos *_file abaixo.
+    secrets:
+      - alertmanager-chatops-secrets
+
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ["alertname", "service_name"]
+      group_wait: 15s
+      group_interval: 1m
+      repeat_interval: 15m
+      receiver: "chatops-discord"
+      routes:
+        # Alerta crítico: dispara Jira Service Management (abre incidente) + Discord.
+        # O self-healing (GitHub Action) é acionado pelo webhook do
+        # Alertmanager — ver observability/otel-collector e
+        # docs/CHANGES.md para o fluxo completo.
+        - matchers:
+            - alertname = "AuthServiceHigh5xxRate"
+          receiver: "incident-jsm-and-discord"
+          continue: false
+    receivers:
+      - name: "chatops-discord"
+        discord_configs:
+          - webhook_url_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/DISCORD_WEBHOOK_URL
+            send_resolved: true
+      - name: "incident-jsm-and-discord"
+        discord_configs:
+          - webhook_url_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/DISCORD_WEBHOOK_URL
+            send_resolved: true
+        # Jira Service Management (sucessor do OpsGenie, que encerrou as
+        # vendas novas). O Alertmanager usa o receiver "opsgenie_configs"
+        # porque a integração Prometheus do JSM é compatível com ele; muda
+        # só a api_url. A API key vem da integração "Prometheus" criada no
+        # JSM (Operations > Teams > Integrations).
+        opsgenie_configs:
+          - api_url: "https://api.atlassian.com/jsm/ops/integration/v2/alerts"
+            api_key_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/JSM_API_KEY
+            message: '{{ .CommonAnnotations.summary }}'
+            description: '{{ .CommonAnnotations.description }}'
+            priority: "P2"
+            send_resolved: true
+        webhook_configs:
+          # Dispara o self-healing: um pequeno relay (AWS Lambda, código em
+          # observability/self-healing/lambda/relay.py) recebe este POST do
+          # Alertmanager e chama a API repository_dispatch do GitHub — o
+          # Alertmanager não consegue chamar a API do GitHub diretamente
+          # porque ela exige o corpo e os headers exatos que o
+          # repository_dispatch espera (o Alertmanager só manda o payload
+          # fixo dele). O header Authorization abaixo é só um segredo
+          # compartilhado simples, que o Lambda valida antes de aceitar a
+          # chamada (evita que qualquer POST na URL do Lambda dispare um
+          # rollout restart).
+          - url_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/SELF_HEAL_RELAY_URL
+            http_config:
+              authorization:
+                type: Bearer
+                credentials_file: /etc/alertmanager/secrets/alertmanager-chatops-secrets/SELF_HEAL_RELAY_SECRET
+            send_resolved: false
+            send_resolved: false
+
+# --- Grafana ---
+grafana:
+  admin:
+    existingSecret: grafana-admin-secret
+    userKey: admin-user
+    passwordKey: admin-password
+
+  defaultDashboardsEnabled: true
+
+  # Datasources explícitas, com UID fixo — assim os dashboards versionados
+  # neste repositório referenciam o datasource por UID e funcionam
+  # independentemente de qual UID o chart atribuiria por padrão ao
+  # datasource "Prometheus" que ele mesmo provisiona.
+  additionalDataSources:
+    - name: Prometheus-ToggleMaster
+      type: prometheus
+      uid: prometheus-tm
+      url: http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090
+      access: proxy
+      isDefault: true
+    - name: Loki-ToggleMaster
+      type: loki
+      uid: loki-tm
+      url: http://loki.observability.svc.cluster.local:3100
+      access: proxy
+      jsonData:
+        maxLines: 1000
+
+  # Sidecar que varre ConfigMaps com a label grafana_dashboard: "1" e
+  # carrega o JSON automaticamente — é assim que o dashboard versionado em
+  # observability/prometheus-grafana/dashboards/ chega ao Grafana, sem
+  # import manual.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  service:
+    type: ClusterIP
+
+# --- Alerta "inteligente": taxa de 5xx do auth-service > 5% ---
+additionalPrometheusRulesMap:
+  togglemaster-rules:
+    groups:
+      - name: togglemaster.auth-service
+        rules:
+          - alert: AuthServiceHigh5xxRate
+            # calls_total vem do connector "spanmetrics" do OTel Collector,
+            # derivado automaticamente dos traces (métricas RED), sem
+            # precisar instrumentar manualmente um contador de erro em
+            # cada serviço.
+            expr: >
+              (
+                sum(rate(calls_total{service_name="auth-service", status_code="STATUS_CODE_ERROR"}[5m]))
+                /
+                sum(rate(calls_total{service_name="auth-service"}[5m]))
+              ) > 0.05
+            for: 2m
+            labels:
+              severity: critical
+              service_name: auth-service
+            annotations:
+              summary: "auth-service com taxa de erro 5xx acima de 5%"
+              description: >
+                A taxa de respostas de erro (5xx) do auth-service está
+                acima de 5% nos últimos 5 minutos. Alerta/incidente aberto no
+                Jira Service Management e self-healing (rollout restart) disparado
+                automaticamente via GitHub Actions.

@@ -14,6 +14,6 @@ data:
   FLAG_SERVICE_URL: "http://flag-service.togglemaster.svc.cluster.local:8002"
   TARGETING_SERVICE_URL: "http://targeting-service.togglemaster.svc.cluster.local:8003"
 
-  AWS_REGION: "us-east-1"
+  AWS_REGION: "us-east-2"
   AWS_DYNAMODB_TABLE: "ToggleMasterAnalytics"
 

@@ -1,0 +1,90 @@
+# Valores do chart "loki" (modo monolítico, armazenamento em filesystem).
+# Repositório Helm: https://grafana-community.github.io/helm-charts
+# Chart: loki
+#
+# Modo monolítico (deploymentMode: Monolithic) é suficiente para a carga
+# de um ambiente sandbox/acadêmico: um único binário fazendo ingestão,
+# indexação e consulta, sem precisar de S3/GCS/MinIO.
+
+deploymentMode: Monolithic
+
+# Fixa o nome do Service como "loki" — é o nome de DNS usado pelo OTel
+# Collector (endpoint OTLP de logs) e pelo datasource do Grafana
+# ("loki.observability.svc.cluster.local:3100").
+fullnameOverride: loki
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+  limits_config:
+    retention_period: 24h
+    allow_structured_metadata: true
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+# O chart "loki" tenta instalar um MinIO embutido por padrão para servir
+# de object store — desligamos porque usamos filesystem local.
+minio:
+  enabled: false
+
+# Gateway (nginx na frente do Loki) não é necessário aqui: o OTel Collector
+# e o Grafana falam direto com o serviço "loki" na porta 3100.
+gateway:
+  enabled: false
+
+# Zera os componentes dos outros modos de deployment (Simple
+# Scalable / Distributed) para não brigar com o modo monolítico.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+queryFrontend:
+  replicas: 0
+queryScheduler:
+  replicas: 0
+distributor:
+  replicas: 0
+compactor:
+  replicas: 0
+indexGateway:
+  replicas: 0
+bloomPlanner:
+  replicas: 0
+bloomBuilder:
+  replicas: 0
+bloomGateway:
+  replicas: 0
+
+test:
+  enabled: false

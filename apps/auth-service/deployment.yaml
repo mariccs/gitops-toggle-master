@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: auth-service
-        image: 499743054252.dkr.ecr.us-east-1.amazonaws.com/auth-service:v1.0.0-5e18583
+        image: 988324628530.dkr.ecr.us-east-2.amazonaws.com/auth-service:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8001
@@ -38,6 +38,8 @@ spec:
             secretKeyRef:
               name: auth-service-secrets
               key: MASTER_KEY
+        - name: CHAOS_ENDPOINT_ENABLED
+          value: "true"
         resources:
           requests:
             cpu: 100m
