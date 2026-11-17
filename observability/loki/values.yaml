@@ -36,9 +36,11 @@ loki:
 
 singleBinary:
   replicas: 1
+  # Sem PVC: o cluster não tem o driver EBS CSI instalado, então o volume
+  # nunca seria provisionado (Pod Pending). Para a demonstração, os logs
+  # ficam em emptyDir (somem se o pod reiniciar).
   persistence:
-    enabled: true
-    size: 5Gi
+    enabled: false
   resources:
     requests:
       cpu: 100m
@@ -87,4 +89,13 @@ bloomGateway:
   replicas: 0
 
 test:
+  enabled: false
+
+# Caches (memcached) do chart pedem GBs de memória e deixam pods Pending
+# em cluster pequeno; o canary é só um gerador de tráfego de teste.
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+lokiCanary:
   enabled: false

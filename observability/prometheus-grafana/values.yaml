@@ -126,7 +126,10 @@ grafana:
       uid: prometheus-tm
       url: http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090
       access: proxy
-      isDefault: true
+      # O chart já provisiona um "Prometheus" padrão; dois datasources
+      # padrão derrubam o Grafana na inicialização. Os dashboards usam o
+      # UID fixo, então não precisamos que este seja o padrão.
+      isDefault: false
     - name: Loki-ToggleMaster
       type: loki
       uid: loki-tm
